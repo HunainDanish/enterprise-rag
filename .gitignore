@@ -22,6 +22,9 @@ Thumbs.db
 # Uploads
 backend/app/uploads/
 
+# SQLite
+backend/app/*.db
+
 # Chroma
 backend/app/vectordb/
 
