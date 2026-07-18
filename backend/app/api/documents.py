@@ -3,13 +3,14 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Annotated
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.database import get_db
 from app.models.document import Document, DocumentRead
+from app.rag.processing import process_document
 
 
 router = APIRouter()
@@ -49,9 +50,11 @@ def _file_extension(filename: str) -> str:
 @router.post("/upload", response_model=list[DocumentRead], status_code=status.HTTP_201_CREATED)
 def upload_documents(
     files: Annotated[list[UploadFile], File(description="One or more documents to upload")],
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ) -> list[DocumentRead]:
     documents: list[Document] = []
+    saved_files: list[tuple[Document, Path]] = []
 
     for upload in files:
         filename = _safe_filename(upload.filename)
@@ -79,10 +82,22 @@ def upload_documents(
         )
         db.add(document)
         documents.append(document)
+        saved_files.append((document, destination))
 
     db.commit()
     for document in documents:
         db.refresh(document)
+        document.status = "processing"
+
+    db.commit()
+    for document, destination in saved_files:
+        db.refresh(document)
+        background_tasks.add_task(
+            process_document,
+            document.id,
+            str(destination),
+            document.filetype,
+        )
 
     return [DocumentRead.model_validate(document) for document in documents]
 
