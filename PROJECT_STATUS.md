@@ -6,7 +6,7 @@ Last updated: July 20, 2026
 
 This project is an Enterprise Document Intelligence Platform built as a full-stack RAG application. The goal is to let users upload business documents, extract and clean their text, index the content into a vector database, and later ask questions over those documents using Gemini through LangChain.
 
-The project currently has a working FastAPI backend foundation, Gemini API wiring, SQLite-backed document tracking, multi-format upload support, document text extraction for PDF, TXT, Markdown, and DOCX files, configurable retrieval chunking, local sentence-transformer embedding generation, persistent ChromaDB vector storage, a semantic search retrieval endpoint, a grounded Gemini RAG answer chain, a source citation layer with SQLite chat logging, session-scoped conversational memory, and document library management endpoints for listing chunk counts, deleting documents, and refreshing embeddings.
+The project currently has a working FastAPI backend foundation, Gemini API wiring, SQLite-backed document tracking, multi-format upload support, document text extraction for PDF, TXT, Markdown, and DOCX files, configurable retrieval chunking, local sentence-transformer embedding generation, persistent ChromaDB vector storage, a semantic search retrieval endpoint, a grounded Gemini RAG answer chain, a source citation layer with SQLite chat logging, session-scoped conversational memory, document library management endpoints for listing chunk counts, deleting documents, and refreshing embeddings, plus a React dashboard shell with Upload, Chat, Library, Stats, and processing-status areas.
 
 The system is being built module by module so each layer is tested before more RAG logic is added.
 
@@ -1079,6 +1079,78 @@ Verified:
 - FastAPI route registration includes `DELETE /api/documents/{document_id}` and `POST /api/documents/{document_id}/refresh`.
 - `DocumentRead` can serialize both `num_chunks` and `chunk_count` from the SQLAlchemy model.
 
+## Module 13: Frontend Dashboard Skeleton
+
+The frontend dashboard shell is implemented.
+
+Implemented files:
+
+- `frontend/src/api/client.ts`
+- `frontend/src/App.tsx`
+- `frontend/src/App.css`
+- `frontend/src/index.css`
+- `frontend/src/main.tsx`
+- `frontend/src/components/UploadPanel.tsx`
+- `frontend/src/components/ChatWindow.tsx`
+- `frontend/src/components/DocumentLibrary.tsx`
+- `frontend/src/components/StatsPanel.tsx`
+- `frontend/src/components/ProcessingStatus.tsx`
+- `frontend/vite.config.ts`
+
+Shared API client:
+
+- Created a single Axios instance in `frontend/src/api/client.ts`.
+- The client reads `import.meta.env.VITE_API_URL`.
+- If `VITE_API_URL` is not set, it falls back to:
+
+```text
+http://127.0.0.1:8000
+```
+
+Dashboard layout:
+
+- Replaced the Vite starter screen with a persistent sidebar and main dashboard content area.
+- Added React Router wiring so `/` and `/dashboard` render the same dashboard shell.
+- All four dashboard panels are visible on one page:
+  - Upload
+  - Chat
+  - Library
+  - Stats
+- Sidebar navigation anchors scroll to the panel sections instead of treating them as separate pages.
+
+Panel skeletons:
+
+- `UploadPanel` contains the upload intake shell.
+- `ChatWindow` contains the chat answer shell and the first version of the amber citation-chain motif.
+- `DocumentLibrary` contains a source-list shell for future document rows.
+- `StatsPanel` contains stable metric tiles for future document and index counts.
+
+Processing status behavior:
+
+- `ProcessingStatus` calls:
+
+```http
+GET /api/documents
+```
+
+- It fetches once on mount.
+- It polls every few seconds only while at least one returned document has `status !== "ready"`.
+- It stops polling when all tracked documents are ready.
+
+Visual direction:
+
+- Implemented the dark navy/slate dashboard aesthetic from the design guide.
+- Uses amber for source/citation and active-processing emphasis.
+- Uses emerald for ready/index-complete state.
+- Uses serif headers with sans-serif UI text and mono metadata labels.
+- Uses restrained 4-6px radii, subtle borders, and layered slate panels.
+
+Verified:
+
+- `npm.cmd run lint` passes.
+- `npm.cmd run build` passes.
+- Production build generated successfully through Vite.
+
 ## Current API Surface
 
 ### Health Check
@@ -1345,6 +1417,7 @@ CHUNK_OVERLAP
 EMBEDDING_MODEL
 DATABASE_URL
 UPLOAD_DIR
+VITE_API_URL
 ```
 
 Current defaults in code:
@@ -1356,6 +1429,7 @@ CHUNK_OVERLAP = 50
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 DATABASE_URL = sqlite:///backend/app/documents.db
 UPLOAD_DIR = backend/app/uploads
+VITE_API_URL = http://127.0.0.1:8000
 ```
 
 ## How to Run
@@ -1411,6 +1485,27 @@ Default Vite dev server:
 http://localhost:5173
 ```
 
+Dashboard routes:
+
+```text
+http://localhost:5173/
+http://localhost:5173/dashboard
+```
+
+Optional frontend API override:
+
+```powershell
+$env:VITE_API_URL="http://127.0.0.1:8000"
+npm run dev
+```
+
+Frontend verification:
+
+```powershell
+npm run lint
+npm run build
+```
+
 
 
 ## Current Completion Summary
@@ -1462,6 +1557,12 @@ Completed:
 - Document list `chunk_count` response field
 - Document delete endpoint with vector and upload-folder cleanup
 - Document refresh endpoint for reprocessing one document
+- Shared frontend Axios API client using `VITE_API_URL`
+- React Router dashboard route shell
+- Persistent dashboard sidebar/navigation
+- Upload, Chat, Library, and Stats panel skeletons
+- Processing status indicator with conditional document polling
+- Navy/slate/amber dashboard visual system
 - Background parsing task
 - Document status updates
 - Extracted text sidecar JSON output
