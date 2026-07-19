@@ -1,4 +1,5 @@
 import json
+import logging
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -10,11 +11,14 @@ from app.rag.chunking import ChunkText, chunk_pages, serialize_chunks
 from app.rag.cleaning import clean_pages
 from app.rag.embeddings import encode_texts
 from app.rag.loaders import PageText, load_document
+from app.rag.vectorstore import add_chunks
 
 
 EXTRACTED_TEXT_FILENAME = "extracted_pages.json"
 CHUNKS_FILENAME = "chunks.json"
 EMBEDDINGS_FILENAME = "embeddings.json"
+
+logger = logging.getLogger(__name__)
 
 
 def extracted_text_path(document_id: str) -> Path:
@@ -60,15 +64,16 @@ def process_document(document_id: str, file_path: str, filetype: str) -> None:
 
         embeddings = encode_texts([chunk.page_content for chunk in chunks])
         _write_embeddings(embeddings_path(document_id), embeddings)
+        add_chunks(document.id, chunks, embeddings)
 
         document.num_pages = len(cleaned_pages)
         document.num_chunks = len(chunks)
-        document.status = "embedded"
+        document.status = "ready"
         db.commit()
     except Exception:
+        logger.exception("Failed to process document %s.", document_id)
         db.rollback()
         _mark_failed(db, document_id)
-        raise
     finally:
         db.close()
 

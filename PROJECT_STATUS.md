@@ -6,7 +6,7 @@ Last updated: July 19, 2026
 
 This project is an Enterprise Document Intelligence Platform built as a full-stack RAG application. The goal is to let users upload business documents, extract and clean their text, index the content into a vector database, and later ask questions over those documents using Gemini through LangChain.
 
-The project currently has a working FastAPI backend foundation, Gemini API wiring, SQLite-backed document tracking, multi-format upload support, document text extraction for PDF, TXT, Markdown, and DOCX files, configurable retrieval chunking, and local sentence-transformer embedding generation.
+The project currently has a working FastAPI backend foundation, Gemini API wiring, SQLite-backed document tracking, multi-format upload support, document text extraction for PDF, TXT, Markdown, and DOCX files, configurable retrieval chunking, local sentence-transformer embedding generation, and persistent ChromaDB vector storage.
 
 The system is being built module by module so each layer is tested before more RAG logic is added.
 
@@ -44,7 +44,7 @@ The system is being built module by module so each layer is tested before more R
 - Uploaded source files are stored on disk.
 - Document metadata is stored in SQLite.
 - Extracted text, retrieval chunks, and local embeddings are currently stored as JSON sidecar files beside uploaded documents.
-- Vector storage is planned under `backend/app/vectordb/`.
+- Vector storage is persisted under `backend/app/vectordb/`.
 
 ## Repository Structure
 
@@ -68,6 +68,7 @@ enterprise-rag/
         embeddings.py
         loaders.py
         processing.py
+        vectorstore.py
       uploads/
       vectordb/
       main.py
@@ -301,7 +302,7 @@ Current status values used:
 - `pending`
 - `processing`
 - `embedding`
-- `embedded`
+- `ready`
 - `failed`
 
 Current default values:
@@ -467,9 +468,10 @@ backend/app/uploads/{document_id}/extracted_pages.json
 
 7. Pass cleaned pages into chunking.
 8. Pass chunks into local embedding generation.
-9. Update `num_pages` and `num_chunks`.
-10. Mark status as `embedded`.
-11. If anything fails, mark status as `failed`.
+9. Store chunks, embeddings, and metadata in ChromaDB.
+10. Update `num_pages` and `num_chunks`.
+11. Mark status as `ready`.
+12. If anything fails, mark status as `failed`.
 
 Current development behavior:
 
@@ -571,7 +573,7 @@ encode_texts(texts: list[str]) -> list[list[float]]
 - Encodes chunks in batches using:
   - `batch_size=32`
   - `show_progress_bar=False`
-- Returns plain Python lists so embeddings can be serialized as JSON and later inserted into the vector store.
+- Returns plain Python lists so embeddings can be serialized as JSON and inserted into the vector store.
 - Returns an empty list immediately when there are no chunks.
 
 Embedding sidecar output:
@@ -592,15 +594,109 @@ Background processing now:
 6. Sets document status to `embedding` while vectors are generated.
 7. Encodes all chunk text in one batched call.
 8. Writes `embeddings.json`.
-9. Updates `num_pages`.
-10. Updates `num_chunks`.
-11. Sets document status to `embedded`.
+9. Passes embeddings to Module 7 for vector storage.
 
 Verified:
 
 - `backend/app/rag/embeddings.py`, `backend/app/rag/processing.py`, `backend/app/rag/chunking.py`, and `backend/app/core/config.py` compile successfully.
 - The backend virtual environment loads `all-MiniLM-L6-v2` through `sentence-transformers`.
 - A smoke test encoded two texts into two 384-dimensional float vectors.
+
+## Module 7: Vector Database - ChromaDB
+
+Persistent vector storage is implemented with ChromaDB.
+
+Implemented files:
+
+- `backend/app/rag/vectorstore.py`
+- `backend/app/rag/processing.py`
+
+Vector store behavior:
+
+- Uses ChromaDB `PersistentClient(path="app/vectordb")`.
+- Uses one shared collection for the whole app:
+  - `documents`
+- Uses embeddings from `settings.EMBEDDING_MODEL`.
+- Current embedding model:
+  - `all-MiniLM-L6-v2`
+- Current expected embedding dimension:
+  - `384`
+- Stores every chunk in the shared collection and separates documents by `document_id` metadata.
+- Uses stable Chroma IDs in this shape:
+
+```text
+{document_id}:{chunk_index}
+```
+
+- Stores chunk text as Chroma documents.
+- Stores precomputed local embeddings from Module 6.
+- Stores chunk metadata:
+  - `document_id`
+  - `filename`
+  - `page_number`
+  - `chunk_index`
+
+Chroma metadata note:
+
+- ChromaDB rejects `None` metadata values.
+- For non-paginated sources such as TXT, Markdown, and DOCX, `page_number=None` is normalized to `page_number=0` inside ChromaDB.
+- The original `chunks.json` sidecar still preserves the loader output metadata.
+
+Implemented functions:
+
+```python
+add_chunks(document_id, chunks, embeddings)
+delete_document(document_id)
+query(embedding, top_k, filter=None)
+```
+
+Function behavior:
+
+- `add_chunks` validates that chunk and embedding counts match.
+- `add_chunks` validates that every embedding length matches the current embedding model dimension before calling ChromaDB.
+- `add_chunks` deletes existing vectors for the same `document_id` before inserting, so reprocessing a document does not duplicate chunks.
+- `add_chunks` rejects duplicate generated chunk IDs before insertion.
+- `delete_document` removes vectors with `where={"document_id": document_id}`.
+- `query` performs vector search with optional Chroma metadata filtering.
+- `query` requires `top_k >= 1`.
+- `query` validates that the query embedding length matches the current embedding model dimension.
+
+Dimension mismatch handling:
+
+- ChromaDB locks a collection's embedding dimension after the first insert.
+- During development, if the persistent `documents` collection expects a different dimension than the current embedding model, the app recreates only that collection.
+- The app does not recreate the collection on every startup.
+- Once the collection accepts 384-dimensional `all-MiniLM-L6-v2` embeddings, vectors persist across server restarts.
+- For empty collections that may still be locked to an old dimension, startup uses a temporary 384-dimensional probe embedding and recreates only if Chroma rejects it.
+
+Background processing now:
+
+1. Extracts raw document text.
+2. Cleans extracted page text.
+3. Writes `extracted_pages.json`.
+4. Chunks cleaned text.
+5. Writes `chunks.json`.
+6. Sets document status to `embedding`.
+7. Encodes all chunk text locally.
+8. Writes `embeddings.json`.
+9. Stores chunks, embeddings, and metadata in ChromaDB.
+10. Updates `num_pages`.
+11. Updates `num_chunks`.
+12. Sets document status to `ready`.
+
+Error handling:
+
+- Chroma insertion failures are logged.
+- Background processing logs unexpected failures.
+- The SQLAlchemy session rolls back on failure.
+- The document status is set to `failed`.
+- Background task exceptions are not re-raised after the document is marked failed, so the server keeps running.
+
+Verified:
+
+- `add_chunks`, filtered `query`, and `delete_document` were tested through the backend virtual environment against ChromaDB.
+- The test inserted two chunks, queried one result by `document_id`, confirmed metadata, deleted the document, and confirmed filtered query returned no IDs.
+- A dimension smoke test confirmed that 384-dimensional vectors insert successfully and 3-dimensional vectors are rejected by `add_chunks` before ChromaDB insertion.
 
 ## Current API Surface
 
@@ -682,7 +778,7 @@ Example response:
     "upload_time": "2026-07-18T19:42:20.265688",
     "num_pages": 1,
     "num_chunks": 3,
-    "status": "embedded"
+    "status": "ready"
   }
 ]
 ```
@@ -704,8 +800,9 @@ User uploads file
   -> Document status becomes embedding
   -> Chunk text is encoded locally with sentence-transformers
   -> Embeddings are saved as JSON
+  -> Chunks, embeddings, and metadata are stored in ChromaDB
   -> Document row is updated with page and chunk counts
-  -> Document status becomes embedded
+  -> Document status becomes ready
 ```
 
 ## Runtime Files
@@ -836,6 +933,9 @@ Completed:
 - Chunk metadata for document ID, filename, page number, and chunk index
 - Local sentence-transformer embedding generation
 - Batched chunk embedding with `batch_size=32`
+- Persistent ChromaDB vector storage
+- Shared ChromaDB collection using `document_id` metadata separation
+- Vector add, delete-by-document, and filtered query helpers
 - Background parsing task
 - Document status updates
 - Extracted text sidecar JSON output
