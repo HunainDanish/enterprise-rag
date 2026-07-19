@@ -6,7 +6,7 @@ Last updated: July 19, 2026
 
 This project is an Enterprise Document Intelligence Platform built as a full-stack RAG application. The goal is to let users upload business documents, extract and clean their text, index the content into a vector database, and later ask questions over those documents using Gemini through LangChain.
 
-The project currently has a working FastAPI backend foundation, Gemini API wiring, SQLite-backed document tracking, multi-format upload support, document text extraction for PDF, TXT, Markdown, and DOCX files, configurable retrieval chunking, local sentence-transformer embedding generation, persistent ChromaDB vector storage, and a semantic search retrieval endpoint.
+The project currently has a working FastAPI backend foundation, Gemini API wiring, SQLite-backed document tracking, multi-format upload support, document text extraction for PDF, TXT, Markdown, and DOCX files, configurable retrieval chunking, local sentence-transformer embedding generation, persistent ChromaDB vector storage, a semantic search retrieval endpoint, and a grounded Gemini RAG answer chain.
 
 The system is being built module by module so each layer is tested before more RAG logic is added.
 
@@ -66,8 +66,10 @@ enterprise-rag/
         cleaning.py
         chunking.py
         embeddings.py
+        chain.py
         loaders.py
         processing.py
+        prompts.py
         retriever.py
         vectorstore.py
       uploads/
@@ -770,6 +772,114 @@ Verified:
 - `backend/app/rag/retriever.py` and `backend/app/api/search.py` compile successfully.
 - A FastAPI `TestClient` smoke test for `GET /api/search?q=test+query&top_k=1` returned HTTP 200 with a retrieved chunk from the existing ChromaDB collection.
 
+## Module 9: Prompt Construction & Gemini RAG Chain
+
+Grounded prompt construction and the Gemini RAG answer chain are implemented.
+
+Implemented files:
+
+- `backend/app/rag/prompts.py`
+- `backend/app/rag/chain.py`
+- `backend/app/api/chat.py`
+
+Prompt behavior:
+
+- Defines a single versioned prompt:
+
+```python
+RAG_PROMPT_VERSION = "rag_prompt_v1"
+```
+
+- Defines `RAG_PROMPT` with strict grounding instructions:
+  - Answer only from the provided context.
+  - Say "I don't know" when the context is insufficient.
+  - Cite the source document and page number for each claim.
+
+Chain behavior:
+
+- Provides:
+
+```python
+answer_question(query, chat_history, document_ids=None)
+```
+
+- Normalizes the query for cache keys and retrieval.
+- Retrieves the top 5 chunks through the Module 8 retriever.
+- Drops chunks below the minimum similarity threshold:
+
+```python
+MIN_SIMILARITY_SCORE = 0.25
+```
+
+- Returns "I don't know" without calling Gemini when no retrieved chunks pass the threshold.
+- Builds the grounded prompt with source-labeled context blocks.
+- Includes recent chat history only to help resolve references in the current question, not as evidence.
+- Calls the shared Gemini `llm` from `backend/app/core/llm.py`.
+
+Retry behavior:
+
+- Wraps Gemini calls with `tenacity`.
+- Retries only likely quota/rate-limit failures containing:
+  - `429`
+  - `RESOURCE_EXHAUSTED`
+- Uses exponential backoff with up to 4 attempts.
+
+Cache behavior:
+
+- Uses a simple in-memory LRU-style cache.
+- Cache key:
+
+```text
+(normalized_query, sorted_document_ids)
+```
+
+- Current cache TTL:
+
+```text
+10 minutes
+```
+
+- Current maximum size:
+
+```text
+128 answers
+```
+
+Implemented endpoint:
+
+```http
+POST /api/chat
+```
+
+Request shape:
+
+```json
+{
+  "question": "What does the policy say about approvals?",
+  "chat_history": [],
+  "document_ids": null
+}
+```
+
+Response shape:
+
+```json
+{
+  "answer": "Grounded answer with citations...",
+  "retrieved_chunks": [],
+  "used_chunks": [],
+  "prompt_version": "rag_prompt_v1",
+  "cached": false
+}
+```
+
+Verified:
+
+- `backend/app/rag/prompts.py`, `backend/app/rag/chain.py`, and `backend/app/api/chat.py` compile successfully.
+- Module 9 imports load successfully.
+- OpenAPI generation includes the `POST /api/chat` request schema.
+- A FastAPI `TestClient` smoke test for `POST /api/chat` returned HTTP 200 with retrieved chunks and `prompt_version = "rag_prompt_v1"` while using a mocked LLM to avoid spending Gemini quota.
+
 ## Current API Surface
 
 ### Health Check
@@ -869,6 +979,24 @@ GET /api/search?q=your+question&top_k=3&document_ids=doc-id-1&document_ids=doc-i
 
 Returns ranked retrieved chunks with similarity score, source filename, page number, chunk index, and chunk text.
 
+### Chat / RAG Answer
+
+```http
+POST /api/chat
+```
+
+Request:
+
+```json
+{
+  "question": "your question",
+  "chat_history": [],
+  "document_ids": null
+}
+```
+
+Returns a grounded Gemini answer plus both the retrieved chunks and the threshold-filtered chunks used in the prompt.
+
 ## Data Flow Implemented So Far
 
 ```text
@@ -893,6 +1021,13 @@ User searches by question
   -> Query text is encoded with the same local embedding model
   -> ChromaDB retrieves the nearest stored chunks
   -> API returns ranked chunks with source metadata for UI inspection
+User asks a chat question
+  -> Query is normalized and checked against the answer cache
+  -> Relevant chunks are retrieved from ChromaDB
+  -> Low-similarity chunks are removed
+  -> A versioned grounded prompt is built
+  -> Gemini is called with quota-aware retry/backoff
+  -> Answer, retrieved chunks, used chunks, prompt version, and cache status are returned
 ```
 
 ## Runtime Files
@@ -1028,6 +1163,12 @@ Completed:
 - Vector add, delete-by-document, and filtered query helpers
 - Semantic retrieval pipeline using the shared embedding model
 - `/api/search` endpoint for retrieved chunk inspection
+- Versioned RAG prompt template
+- Grounded Gemini RAG answer chain
+- Similarity threshold filtering before LLM calls
+- Gemini quota retry/backoff for 429 and `RESOURCE_EXHAUSTED`
+- In-memory answer cache for repeated demo questions
+- `/api/chat` endpoint for RAG answers
 - Background parsing task
 - Document status updates
 - Extracted text sidecar JSON output
