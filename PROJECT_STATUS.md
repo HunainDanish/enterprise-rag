@@ -6,7 +6,7 @@ Last updated: July 19, 2026
 
 This project is an Enterprise Document Intelligence Platform built as a full-stack RAG application. The goal is to let users upload business documents, extract and clean their text, index the content into a vector database, and later ask questions over those documents using Gemini through LangChain.
 
-The project currently has a working FastAPI backend foundation, Gemini API wiring, SQLite-backed document tracking, multi-format upload support, document text extraction for PDF, TXT, Markdown, and DOCX files, configurable retrieval chunking, local sentence-transformer embedding generation, and persistent ChromaDB vector storage.
+The project currently has a working FastAPI backend foundation, Gemini API wiring, SQLite-backed document tracking, multi-format upload support, document text extraction for PDF, TXT, Markdown, and DOCX files, configurable retrieval chunking, local sentence-transformer embedding generation, persistent ChromaDB vector storage, and a semantic search retrieval endpoint.
 
 The system is being built module by module so each layer is tested before more RAG logic is added.
 
@@ -68,6 +68,7 @@ enterprise-rag/
         embeddings.py
         loaders.py
         processing.py
+        retriever.py
         vectorstore.py
       uploads/
       vectordb/
@@ -698,6 +699,77 @@ Verified:
 - The test inserted two chunks, queried one result by `document_id`, confirmed metadata, deleted the document, and confirmed filtered query returned no IDs.
 - A dimension smoke test confirmed that 384-dimensional vectors insert successfully and 3-dimensional vectors are rejected by `add_chunks` before ChromaDB insertion.
 
+## Module 8: Semantic Search / Retrieval Pipeline
+
+Semantic search retrieval is implemented and exposed through its own inspection endpoint.
+
+Implemented files:
+
+- `backend/app/rag/retriever.py`
+- `backend/app/api/search.py`
+
+Retrieval behavior:
+
+- Provides:
+
+```python
+retrieve(query, top_k=5, document_ids=None)
+```
+
+- Embeds user questions with the same `encode_texts` function used for document chunks.
+- Calls the shared ChromaDB vector store `query` helper.
+- Supports optional filtering by one or more `document_id` values.
+- Returns UI-ready retrieved chunk rows with:
+  - `document_id`
+  - `source_filename`
+  - `page_number`
+  - `chunk_index`
+  - `chunk_text`
+  - `similarity_score`
+  - `distance`
+
+Score note:
+
+- ChromaDB returns distances, where smaller means closer.
+- The retriever exposes `similarity_score = 1 / (1 + distance)`, where larger means more similar, and also keeps the raw `distance` for debugging.
+
+Implemented endpoint:
+
+```http
+GET /api/search?q=...
+```
+
+Optional query parameters:
+
+- `top_k`
+- `document_ids`
+
+Example response shape:
+
+```json
+{
+  "query": "What does the policy say about approvals?",
+  "top_k": 5,
+  "document_ids": null,
+  "results": [
+    {
+      "document_id": "5935cdd8-6924-4354-b945-f16aa1dff01a",
+      "source_filename": "policy.pdf",
+      "page_number": 2,
+      "chunk_index": 4,
+      "chunk_text": "Relevant chunk text...",
+      "similarity_score": 0.72,
+      "distance": 0.38
+    }
+  ]
+}
+```
+
+Verified:
+
+- `backend/app/rag/retriever.py` and `backend/app/api/search.py` compile successfully.
+- A FastAPI `TestClient` smoke test for `GET /api/search?q=test+query&top_k=1` returned HTTP 200 with a retrieved chunk from the existing ChromaDB collection.
+
 ## Current API Surface
 
 ### Health Check
@@ -783,6 +855,20 @@ Example response:
 ]
 ```
 
+### Search Retrieved Chunks
+
+```http
+GET /api/search?q=your+question
+```
+
+Optional filters:
+
+```http
+GET /api/search?q=your+question&top_k=3&document_ids=doc-id-1&document_ids=doc-id-2
+```
+
+Returns ranked retrieved chunks with similarity score, source filename, page number, chunk index, and chunk text.
+
 ## Data Flow Implemented So Far
 
 ```text
@@ -803,6 +889,10 @@ User uploads file
   -> Chunks, embeddings, and metadata are stored in ChromaDB
   -> Document row is updated with page and chunk counts
   -> Document status becomes ready
+User searches by question
+  -> Query text is encoded with the same local embedding model
+  -> ChromaDB retrieves the nearest stored chunks
+  -> API returns ranked chunks with source metadata for UI inspection
 ```
 
 ## Runtime Files
@@ -936,6 +1026,8 @@ Completed:
 - Persistent ChromaDB vector storage
 - Shared ChromaDB collection using `document_id` metadata separation
 - Vector add, delete-by-document, and filtered query helpers
+- Semantic retrieval pipeline using the shared embedding model
+- `/api/search` endpoint for retrieved chunk inspection
 - Background parsing task
 - Document status updates
 - Extracted text sidecar JSON output
