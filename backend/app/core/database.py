@@ -25,6 +25,7 @@ def get_db() -> Generator[Session, None, None]:
 
 
 def init_db() -> None:
+    import app.models.chat_log  # noqa: F401
     import app.models.document  # noqa: F401
 
     Base.metadata.create_all(bind=engine)

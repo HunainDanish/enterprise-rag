@@ -6,7 +6,7 @@ Last updated: July 19, 2026
 
 This project is an Enterprise Document Intelligence Platform built as a full-stack RAG application. The goal is to let users upload business documents, extract and clean their text, index the content into a vector database, and later ask questions over those documents using Gemini through LangChain.
 
-The project currently has a working FastAPI backend foundation, Gemini API wiring, SQLite-backed document tracking, multi-format upload support, document text extraction for PDF, TXT, Markdown, and DOCX files, configurable retrieval chunking, local sentence-transformer embedding generation, persistent ChromaDB vector storage, a semantic search retrieval endpoint, and a grounded Gemini RAG answer chain.
+The project currently has a working FastAPI backend foundation, Gemini API wiring, SQLite-backed document tracking, multi-format upload support, document text extraction for PDF, TXT, Markdown, and DOCX files, configurable retrieval chunking, local sentence-transformer embedding generation, persistent ChromaDB vector storage, a semantic search retrieval endpoint, a grounded Gemini RAG answer chain, and a source citation layer with SQLite chat logging.
 
 The system is being built module by module so each layer is tested before more RAG logic is added.
 
@@ -61,6 +61,7 @@ enterprise-rag/
         database.py
         llm.py
       models/
+        chat_log.py
         document.py
       rag/
         cleaning.py
@@ -298,6 +299,16 @@ upload_time
 num_pages
 num_chunks
 status
+```
+
+Chat log database model:
+
+```text
+id
+query
+sources_json
+answer
+created_at
 ```
 
 Current status values used:
@@ -866,10 +877,14 @@ Response shape:
 ```json
 {
   "answer": "Grounded answer with citations...",
-  "retrieved_chunks": [],
-  "used_chunks": [],
-  "prompt_version": "rag_prompt_v1",
-  "cached": false
+  "sources": [
+    {
+      "filename": "policy.pdf",
+      "page_number": 2,
+      "chunk_text": "Exact retrieved chunk text...",
+      "score": 0.72
+    }
+  ]
 }
 ```
 
@@ -878,7 +893,58 @@ Verified:
 - `backend/app/rag/prompts.py`, `backend/app/rag/chain.py`, and `backend/app/api/chat.py` compile successfully.
 - Module 9 imports load successfully.
 - OpenAPI generation includes the `POST /api/chat` request schema.
-- A FastAPI `TestClient` smoke test for `POST /api/chat` returned HTTP 200 with retrieved chunks and `prompt_version = "rag_prompt_v1"` while using a mocked LLM to avoid spending Gemini quota.
+- A FastAPI `TestClient` smoke test confirmed the RAG chain could be reached through `POST /api/chat` while using a mocked LLM to avoid spending Gemini quota.
+
+## Module 10: Source Citation Layer
+
+Source citations and backend chat logging are implemented.
+
+Implemented files:
+
+- `backend/app/models/chat_log.py`
+- `backend/app/core/database.py`
+- `backend/app/rag/chain.py`
+- `backend/app/api/chat.py`
+
+Citation behavior:
+
+- Chat responses now expose the frontend-ready shape:
+
+```json
+{
+  "answer": "Grounded answer...",
+  "sources": [
+    {
+      "filename": "policy.pdf",
+      "page_number": 2,
+      "chunk_text": "Exact retrieved chunk text...",
+      "score": 0.72
+    }
+  ]
+}
+```
+
+- Sources are generated from the chunks that passed the similarity threshold and were used in the prompt.
+- Sources are de-duplicated by `(filename, page_number)` so one page is not repeated when multiple chunks from that page are retrieved.
+- When duplicate chunks from the same page exist, the highest-scoring chunk is kept as the visible exact chunk citation.
+
+Chat logging behavior:
+
+- Added a SQLite-backed `chat_logs` table.
+- Every chat request logs:
+  - `query`
+  - `sources_json`
+  - `answer`
+  - `created_at`
+- This table is ready to double as chat history storage in a later module.
+- `init_db()` imports the chat log model so the table is created during FastAPI startup.
+
+Verified:
+
+- `backend/app/models/chat_log.py`, `backend/app/core/database.py`, `backend/app/rag/chain.py`, and `backend/app/api/chat.py` compile successfully.
+- Module 10 imports load successfully and `init_db()` creates the `chat_logs` table.
+- A mocked FastAPI `TestClient` smoke test for `POST /api/chat` returned only `answer` and `sources`.
+- The mocked smoke test confirmed a new `chat_logs` row was inserted.
 
 ## Current API Surface
 
@@ -995,7 +1061,7 @@ Request:
 }
 ```
 
-Returns a grounded Gemini answer plus both the retrieved chunks and the threshold-filtered chunks used in the prompt.
+Returns a grounded Gemini answer plus de-duplicated source citations containing filename, page number, exact chunk text, and score.
 
 ## Data Flow Implemented So Far
 
@@ -1027,7 +1093,9 @@ User asks a chat question
   -> Low-similarity chunks are removed
   -> A versioned grounded prompt is built
   -> Gemini is called with quota-aware retry/backoff
-  -> Answer, retrieved chunks, used chunks, prompt version, and cache status are returned
+  -> Sources are de-duplicated by filename and page number
+  -> Query, sources, and answer are logged to SQLite
+  -> Answer and source citations are returned
 ```
 
 ## Runtime Files
@@ -1169,6 +1237,9 @@ Completed:
 - Gemini quota retry/backoff for 429 and `RESOURCE_EXHAUSTED`
 - In-memory answer cache for repeated demo questions
 - `/api/chat` endpoint for RAG answers
+- Source citation response shape for chat answers
+- De-duplicated source list with exact chunk text and score
+- SQLite `chat_logs` table for query/source/answer history
 - Background parsing task
 - Document status updates
 - Extracted text sidecar JSON output

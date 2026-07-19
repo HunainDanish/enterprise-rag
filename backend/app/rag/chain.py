@@ -27,8 +27,16 @@ class ChatMessage(TypedDict):
     content: str
 
 
+class SourceCitation(TypedDict):
+    filename: str | None
+    page_number: int | None
+    chunk_text: str
+    score: float
+
+
 class AnswerResult(TypedDict):
     answer: str
+    sources: list[SourceCitation]
     retrieved_chunks: list[RetrievedChunk]
     used_chunks: list[RetrievedChunk]
     prompt_version: str
@@ -65,6 +73,7 @@ def answer_question(
     if not used_chunks:
         result = {
             "answer": "I don't know. The provided context does not contain enough information to answer that.",
+            "sources": [],
             "retrieved_chunks": retrieved_chunks,
             "used_chunks": [],
             "prompt_version": RAG_PROMPT_VERSION,
@@ -77,6 +86,7 @@ def answer_question(
     response = _invoke_llm_with_retry(prompt)
     result = {
         "answer": _response_text(response),
+        "sources": deduplicate_sources(used_chunks),
         "retrieved_chunks": retrieved_chunks,
         "used_chunks": used_chunks,
         "prompt_version": RAG_PROMPT_VERSION,
@@ -84,6 +94,26 @@ def answer_question(
     }
     _set_cached_answer(cache_key, result)
     return result
+
+
+def deduplicate_sources(chunks: Sequence[RetrievedChunk]) -> list[SourceCitation]:
+    sources_by_page: OrderedDict[tuple[str | None, str | None, int | None], SourceCitation] = OrderedDict()
+    for chunk in chunks:
+        key = (chunk["document_id"], chunk["source_filename"], chunk["page_number"])
+        source = {
+            "filename": chunk["source_filename"],
+            "page_number": chunk["page_number"],
+            "chunk_text": chunk["chunk_text"],
+            "score": chunk["similarity_score"],
+        }
+        existing = sources_by_page.get(key)
+        if existing is None:
+            sources_by_page[key] = source
+            continue
+        if source["score"] > existing["score"]:
+            sources_by_page[key] = source
+
+    return list(sources_by_page.values())
 
 
 def build_prompt(
@@ -215,6 +245,7 @@ def _response_text(response: Any) -> str:
 def _empty_answer(answer: str, cached: bool) -> AnswerResult:
     return {
         "answer": answer,
+        "sources": [],
         "retrieved_chunks": [],
         "used_chunks": [],
         "prompt_version": RAG_PROMPT_VERSION,
