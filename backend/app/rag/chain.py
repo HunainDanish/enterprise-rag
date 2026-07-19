@@ -4,9 +4,12 @@ from collections import OrderedDict
 from collections.abc import Sequence
 from typing import Any, TypedDict
 
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from app.core.llm import llm
+from app.models.chat_log import ChatLog
 from app.rag.prompts import RAG_PROMPT, RAG_PROMPT_VERSION
 from app.rag.retriever import RetrievedChunk, retrieve
 
@@ -17,9 +20,10 @@ DEFAULT_TOP_K = 5
 MIN_SIMILARITY_SCORE = 0.25
 CACHE_TTL_SECONDS = 10 * 60
 MAX_CACHE_SIZE = 128
+MAX_HISTORY_TURNS = 6
 
 _quota_error_markers = ("429", "RESOURCE_EXHAUSTED")
-_answer_cache: OrderedDict[tuple[str, tuple[str, ...]], tuple[float, "AnswerResult"]] = OrderedDict()
+_answer_cache: OrderedDict[tuple[Any, ...], tuple[float, "AnswerResult"]] = OrderedDict()
 
 
 class ChatMessage(TypedDict):
@@ -47,20 +51,31 @@ def answer_question(
     query: str,
     chat_history: Sequence[ChatMessage | dict[str, str]] | None,
     document_ids: list[str] | None = None,
+    session_id: str | None = None,
+    db: Session | None = None,
 ) -> AnswerResult:
     cleaned_query = query.strip()
     normalized_query = _normalize_query(query)
     if not cleaned_query:
         return _empty_answer("I don't know.", cached=False)
 
+    persisted_history = _load_recent_session_history(db, session_id)
+    effective_history = [*persisted_history, *_normalize_chat_history(chat_history)]
+    retrieval_query = rewrite_query_for_retrieval(cleaned_query, effective_history)
     normalized_document_ids = _normalize_document_ids(document_ids)
-    cache_key = (normalized_query, normalized_document_ids)
+    cache_key = (
+        session_id,
+        normalized_query,
+        _normalize_query(retrieval_query),
+        normalized_document_ids,
+        _history_cache_key(effective_history),
+    )
     cached = _get_cached_answer(cache_key)
     if cached is not None:
         return {**cached, "cached": True}
 
     retrieved_chunks = retrieve(
-        cleaned_query,
+        retrieval_query,
         top_k=DEFAULT_TOP_K,
         document_ids=list(normalized_document_ids) or None,
     )
@@ -82,7 +97,7 @@ def answer_question(
         _set_cached_answer(cache_key, result)
         return result
 
-    prompt = build_prompt(cleaned_query, used_chunks, chat_history)
+    prompt = build_prompt(cleaned_query, used_chunks, effective_history)
     response = _invoke_llm_with_retry(prompt)
     result = {
         "answer": _response_text(response),
@@ -94,6 +109,27 @@ def answer_question(
     }
     _set_cached_answer(cache_key, result)
     return result
+
+
+def rewrite_query_for_retrieval(
+    query: str,
+    chat_history: Sequence[ChatMessage | dict[str, str]],
+) -> str:
+    history = _format_chat_history(chat_history)
+    if not history:
+        return query
+
+    prompt = (
+        "Rewrite the current question as a standalone search query for retrieving "
+        "enterprise document chunks. Use the conversation history only to resolve "
+        "pronouns and references. Do not answer the question. Return only the "
+        "rewritten search query.\n\n"
+        f"Conversation history:\n{history}\n\n"
+        f"Current question: {query}\n"
+        "Standalone search query:"
+    )
+    rewritten_query = _response_text(_invoke_llm_with_retry(prompt))
+    return rewritten_query or query
 
 
 def deduplicate_sources(chunks: Sequence[RetrievedChunk]) -> list[SourceCitation]:
@@ -122,18 +158,18 @@ def build_prompt(
     chat_history: Sequence[ChatMessage | dict[str, str]] | None = None,
 ) -> str:
     history = _format_chat_history(chat_history)
-    question_with_history = question
+    prompt = RAG_PROMPT.format(
+        context=_format_context(chunks),
+        question=question,
+    )
     if history:
-        question_with_history = (
+        return (
             "Conversation history for resolving references only:\n"
             f"{history}\n\n"
-            f"Current question: {question}"
+            f"{prompt}"
         )
 
-    return RAG_PROMPT.format(
-        context=_format_context(chunks),
-        question=question_with_history,
-    )
+    return prompt
 
 
 def _is_retryable_quota_error(error: BaseException) -> bool:
@@ -188,6 +224,52 @@ def _format_chat_history(
     return "\n".join(formatted_messages)
 
 
+def _load_recent_session_history(db: Session | None, session_id: str | None) -> list[ChatMessage]:
+    if db is None or not session_id:
+        return []
+
+    rows = list(
+        db.scalars(
+            select(ChatLog)
+            .where(ChatLog.session_id == session_id)
+            .order_by(ChatLog.created_at.desc(), ChatLog.id.desc())
+            .limit(MAX_HISTORY_TURNS)
+        )
+    )
+    rows.reverse()
+
+    messages: list[ChatMessage] = []
+    for row in rows:
+        messages.append({"role": "user", "content": row.query})
+        messages.append({"role": "assistant", "content": row.answer})
+
+    return messages
+
+
+def _normalize_chat_history(
+    chat_history: Sequence[ChatMessage | dict[str, str]] | None,
+) -> list[ChatMessage]:
+    if not chat_history:
+        return []
+
+    messages: list[ChatMessage] = []
+    for message in chat_history:
+        content = str(message.get("content", "")).strip()
+        if not content:
+            continue
+        role = str(message.get("role", "user")).strip() or "user"
+        messages.append({"role": role, "content": content})
+
+    return messages
+
+
+def _history_cache_key(chat_history: Sequence[ChatMessage | dict[str, str]]) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (str(message.get("role", "")), _normalize_query(str(message.get("content", ""))))
+        for message in chat_history[-(MAX_HISTORY_TURNS * 2):]
+    )
+
+
 def _normalize_query(query: str) -> str:
     return " ".join(query.strip().lower().split())
 
@@ -199,7 +281,7 @@ def _normalize_document_ids(document_ids: list[str] | None) -> tuple[str, ...]:
 
 
 def _get_cached_answer(
-    cache_key: tuple[str, tuple[str, ...]],
+    cache_key: tuple[Any, ...],
 ) -> AnswerResult | None:
     cached = _answer_cache.get(cache_key)
     if cached is None:
@@ -218,7 +300,7 @@ def _get_cached_answer(
 
 
 def _set_cached_answer(
-    cache_key: tuple[str, tuple[str, ...]],
+    cache_key: tuple[Any, ...],
     result: AnswerResult,
 ) -> None:
     _answer_cache[cache_key] = (time.monotonic(), result)

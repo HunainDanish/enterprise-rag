@@ -6,7 +6,7 @@ Last updated: July 19, 2026
 
 This project is an Enterprise Document Intelligence Platform built as a full-stack RAG application. The goal is to let users upload business documents, extract and clean their text, index the content into a vector database, and later ask questions over those documents using Gemini through LangChain.
 
-The project currently has a working FastAPI backend foundation, Gemini API wiring, SQLite-backed document tracking, multi-format upload support, document text extraction for PDF, TXT, Markdown, and DOCX files, configurable retrieval chunking, local sentence-transformer embedding generation, persistent ChromaDB vector storage, a semantic search retrieval endpoint, a grounded Gemini RAG answer chain, and a source citation layer with SQLite chat logging.
+The project currently has a working FastAPI backend foundation, Gemini API wiring, SQLite-backed document tracking, multi-format upload support, document text extraction for PDF, TXT, Markdown, and DOCX files, configurable retrieval chunking, local sentence-transformer embedding generation, persistent ChromaDB vector storage, a semantic search retrieval endpoint, a grounded Gemini RAG answer chain, a source citation layer with SQLite chat logging, and session-scoped conversational memory.
 
 The system is being built module by module so each layer is tested before more RAG logic is added.
 
@@ -305,10 +305,19 @@ Chat log database model:
 
 ```text
 id
+session_id
 query
 sources_json
 answer
 created_at
+```
+
+Chat session database model:
+
+```text
+id
+created_at
+updated_at
 ```
 
 Current status values used:
@@ -908,10 +917,11 @@ Implemented files:
 
 Citation behavior:
 
-- Chat responses now expose the frontend-ready shape:
+- Chat responses expose the frontend-ready citation shape, with `session_id` added by Module 11 for conversational memory:
 
 ```json
 {
+  "session_id": "session-123",
   "answer": "Grounded answer...",
   "sources": [
     {
@@ -943,8 +953,78 @@ Verified:
 
 - `backend/app/models/chat_log.py`, `backend/app/core/database.py`, `backend/app/rag/chain.py`, and `backend/app/api/chat.py` compile successfully.
 - Module 10 imports load successfully and `init_db()` creates the `chat_logs` table.
-- A mocked FastAPI `TestClient` smoke test for `POST /api/chat` returned only `answer` and `sources`.
+- A mocked FastAPI `TestClient` smoke test for `POST /api/chat` returned `answer`, `sources`, and the session ID used for conversational memory.
 - The mocked smoke test confirmed a new `chat_logs` row was inserted.
+
+## Module 11: Conversational Memory
+
+Session-scoped conversational memory is implemented.
+
+Implemented files:
+
+- `backend/app/models/chat_log.py`
+- `backend/app/core/database.py`
+- `backend/app/rag/chain.py`
+- `backend/app/api/chat.py`
+
+Memory behavior:
+
+- Chat requests now accept an optional `session_id`.
+- If no `session_id` is provided, the backend creates a UUID session and returns it in the response.
+- Each chat turn is stored under its session in SQLite.
+- The chain loads the last 6 turns for the session before answering.
+- Recent session history is prepended to the prompt before the retrieved document context.
+- History is used only to resolve references; answers are still grounded only in retrieved document chunks.
+
+Follow-up rewrite behavior:
+
+- Before embedding/retrieval, contextual follow-up questions are rewritten into standalone search queries using Gemini.
+- The rewrite prompt uses recent session history and asks Gemini to return only the standalone retrieval query.
+- If no session history exists, the original question is embedded directly.
+- Answer cache keys now include session and history context so follow-up answers are not reused across unrelated conversations.
+
+Implemented endpoints:
+
+```http
+GET /api/chat/{session_id}/history
+DELETE /api/chat/{session_id}
+```
+
+History response shape:
+
+```json
+{
+  "session_id": "session-123",
+  "history": [
+    {
+      "id": 1,
+      "query": "What are the required features?",
+      "answer": "Grounded answer...",
+      "sources": [],
+      "created_at": "2026-07-19T12:00:00Z"
+    }
+  ]
+}
+```
+
+Clear response shape:
+
+```json
+{
+  "session_id": "session-123",
+  "deleted_turns": 2
+}
+```
+
+Schema migration note:
+
+- `init_db()` includes a lightweight SQLite guard that adds `chat_logs.session_id` to existing development databases if the table was created before Module 11.
+
+Verified:
+
+- Module 11 files compile successfully.
+- `init_db()` applies the chat log session schema guard successfully.
+- A mocked FastAPI `TestClient` smoke test created two turns in one session, retrieved both through `GET /api/chat/{session_id}/history`, and cleared them through `DELETE /api/chat/{session_id}`.
 
 ## Current API Surface
 
@@ -1055,13 +1135,47 @@ Request:
 
 ```json
 {
+  "session_id": "optional-session-id",
   "question": "your question",
   "chat_history": [],
   "document_ids": null
 }
 ```
 
+Response:
+
+```json
+{
+  "session_id": "session-id",
+  "answer": "Grounded answer with citations...",
+  "sources": [
+    {
+      "filename": "policy.pdf",
+      "page_number": 2,
+      "chunk_text": "Exact retrieved chunk text...",
+      "score": 0.72
+    }
+  ]
+}
+```
+
 Returns a grounded Gemini answer plus de-duplicated source citations containing filename, page number, exact chunk text, and score.
+
+### Chat History
+
+```http
+GET /api/chat/{session_id}/history
+```
+
+Returns all stored turns for that chat session ordered oldest first.
+
+### Clear Chat Session
+
+```http
+DELETE /api/chat/{session_id}
+```
+
+Deletes all stored turns for the session and removes the session row.
 
 ## Data Flow Implemented So Far
 
@@ -1088,14 +1202,19 @@ User searches by question
   -> ChromaDB retrieves the nearest stored chunks
   -> API returns ranked chunks with source metadata for UI inspection
 User asks a chat question
-  -> Query is normalized and checked against the answer cache
-  -> Relevant chunks are retrieved from ChromaDB
+  -> Session ID is reused or created
+  -> Recent turns for that session are loaded from SQLite
+  -> Follow-up question is rewritten into a standalone retrieval query when history exists
+  -> Rewritten query is checked against the session-aware answer cache
+  -> Relevant chunks are retrieved from ChromaDB using the standalone query
   -> Low-similarity chunks are removed
-  -> A versioned grounded prompt is built
+  -> A versioned grounded prompt is built with conversation history before retrieved context
   -> Gemini is called with quota-aware retry/backoff
   -> Sources are de-duplicated by filename and page number
-  -> Query, sources, and answer are logged to SQLite
-  -> Answer and source citations are returned
+  -> Session ID, query, sources, and answer are logged to SQLite
+  -> Session ID, answer, and source citations are returned
+User views or clears chat history
+  -> History is read from or deleted from SQLite by session ID
 ```
 
 ## Runtime Files
@@ -1240,6 +1359,9 @@ Completed:
 - Source citation response shape for chat answers
 - De-duplicated source list with exact chunk text and score
 - SQLite `chat_logs` table for query/source/answer history
+- Session-scoped chat memory
+- Follow-up query rewriting before retrieval
+- Chat history and clear-session endpoints
 - Background parsing task
 - Document status updates
 - Extracted text sidecar JSON output
