@@ -6,7 +6,7 @@ Last updated: July 19, 2026
 
 This project is an Enterprise Document Intelligence Platform built as a full-stack RAG application. The goal is to let users upload business documents, extract and clean their text, index the content into a vector database, and later ask questions over those documents using Gemini through LangChain.
 
-The project currently has a working FastAPI backend foundation, Gemini API wiring, SQLite-backed document tracking, multi-format upload support, document text extraction for PDF, TXT, Markdown, and DOCX files, and configurable retrieval chunking.
+The project currently has a working FastAPI backend foundation, Gemini API wiring, SQLite-backed document tracking, multi-format upload support, document text extraction for PDF, TXT, Markdown, and DOCX files, configurable retrieval chunking, and local sentence-transformer embedding generation.
 
 The system is being built module by module so each layer is tested before more RAG logic is added.
 
@@ -43,7 +43,7 @@ The system is being built module by module so each layer is tested before more R
 
 - Uploaded source files are stored on disk.
 - Document metadata is stored in SQLite.
-- Extracted text and retrieval chunks are currently stored as JSON sidecar files beside uploaded documents.
+- Extracted text, retrieval chunks, and local embeddings are currently stored as JSON sidecar files beside uploaded documents.
 - Vector storage is planned under `backend/app/vectordb/`.
 
 ## Repository Structure
@@ -65,6 +65,7 @@ enterprise-rag/
       rag/
         cleaning.py
         chunking.py
+        embeddings.py
         loaders.py
         processing.py
       uploads/
@@ -300,6 +301,7 @@ Current status values used:
 - `pending`
 - `processing`
 - `embedding`
+- `embedded`
 - `failed`
 
 Current default values:
@@ -464,9 +466,10 @@ backend/app/uploads/{document_id}/extracted_pages.json
 ```
 
 7. Pass cleaned pages into chunking.
-8. Update `num_pages` and `num_chunks`.
-9. Mark status as `embedding`.
-10. If anything fails, mark status as `failed`.
+8. Pass chunks into local embedding generation.
+9. Update `num_pages` and `num_chunks`.
+10. Mark status as `embedded`.
+11. If anything fails, mark status as `failed`.
 
 Current development behavior:
 
@@ -535,14 +538,69 @@ Background processing now:
 3. Writes `extracted_pages.json`.
 4. Chunks cleaned text.
 5. Writes `chunks.json`.
-6. Updates `num_pages`.
-7. Updates `num_chunks`.
-8. Sets document status to `embedding`.
+6. Sets document status to `embedding` before Module 6 handles vectors.
 
 Verified:
 
 - `backend/app/rag/chunking.py`, `backend/app/rag/processing.py`, and `backend/app/core/config.py` compile successfully.
 - The backend virtual environment imports `RecursiveCharacterTextSplitter` and `app.rag.chunking.chunk_pages` successfully.
+
+## Module 6: Embedding Generation
+
+Local embedding generation is implemented and wired into background processing.
+
+Implemented files:
+
+- `backend/app/rag/embeddings.py`
+- `backend/app/rag/processing.py`
+- `backend/app/core/config.py`
+
+Embedding behavior:
+
+- Uses `sentence-transformers` locally, so embedding does not consume Gemini API quota.
+- Loads a single shared `SentenceTransformer` model at module import time.
+- Uses the configured model from `settings.EMBEDDING_MODEL`.
+- Current default:
+  - `EMBEDDING_MODEL = "all-MiniLM-L6-v2"`
+- Provides:
+
+```python
+encode_texts(texts: list[str]) -> list[list[float]]
+```
+
+- Encodes chunks in batches using:
+  - `batch_size=32`
+  - `show_progress_bar=False`
+- Returns plain Python lists so embeddings can be serialized as JSON and later inserted into the vector store.
+- Returns an empty list immediately when there are no chunks.
+
+Embedding sidecar output:
+
+```text
+backend/app/uploads/{document_id}/embeddings.json
+```
+
+Embeddings are stored in the same order as `chunks.json`, so later vector-store indexing can pair each vector with the chunk at the same index.
+
+Background processing now:
+
+1. Extracts raw document text.
+2. Cleans extracted page text.
+3. Writes `extracted_pages.json`.
+4. Chunks cleaned text.
+5. Writes `chunks.json`.
+6. Sets document status to `embedding` while vectors are generated.
+7. Encodes all chunk text in one batched call.
+8. Writes `embeddings.json`.
+9. Updates `num_pages`.
+10. Updates `num_chunks`.
+11. Sets document status to `embedded`.
+
+Verified:
+
+- `backend/app/rag/embeddings.py`, `backend/app/rag/processing.py`, `backend/app/rag/chunking.py`, and `backend/app/core/config.py` compile successfully.
+- The backend virtual environment loads `all-MiniLM-L6-v2` through `sentence-transformers`.
+- A smoke test encoded two texts into two 384-dimensional float vectors.
 
 ## Current API Surface
 
@@ -624,7 +682,7 @@ Example response:
     "upload_time": "2026-07-18T19:42:20.265688",
     "num_pages": 1,
     "num_chunks": 3,
-    "status": "embedding"
+    "status": "embedded"
   }
 ]
 ```
@@ -643,8 +701,11 @@ User uploads file
   -> Extracted pages are saved as JSON
   -> Cleaned text is split into overlapping chunks
   -> Chunks are saved as JSON with citation metadata
-  -> Document row is updated with page and chunk counts
   -> Document status becomes embedding
+  -> Chunk text is encoded locally with sentence-transformers
+  -> Embeddings are saved as JSON
+  -> Document row is updated with page and chunk counts
+  -> Document status becomes embedded
 ```
 
 ## Runtime Files
@@ -773,7 +834,10 @@ Completed:
 - RecursiveCharacterTextSplitter chunking
 - Configurable chunk size and overlap
 - Chunk metadata for document ID, filename, page number, and chunk index
+- Local sentence-transformer embedding generation
+- Batched chunk embedding with `batch_size=32`
 - Background parsing task
 - Document status updates
 - Extracted text sidecar JSON output
 - Chunk sidecar JSON output
+- Embedding sidecar JSON output

@@ -8,11 +8,13 @@ from app.core.database import SessionLocal
 from app.models.document import Document
 from app.rag.chunking import ChunkText, chunk_pages, serialize_chunks
 from app.rag.cleaning import clean_pages
+from app.rag.embeddings import encode_texts
 from app.rag.loaders import PageText, load_document
 
 
 EXTRACTED_TEXT_FILENAME = "extracted_pages.json"
 CHUNKS_FILENAME = "chunks.json"
+EMBEDDINGS_FILENAME = "embeddings.json"
 
 
 def extracted_text_path(document_id: str) -> Path:
@@ -21,6 +23,10 @@ def extracted_text_path(document_id: str) -> Path:
 
 def chunks_path(document_id: str) -> Path:
     return settings.UPLOAD_DIR / document_id / CHUNKS_FILENAME
+
+
+def embeddings_path(document_id: str) -> Path:
+    return settings.UPLOAD_DIR / document_id / EMBEDDINGS_FILENAME
 
 
 def process_document(document_id: str, file_path: str, filetype: str) -> None:
@@ -49,10 +55,15 @@ def process_document(document_id: str, file_path: str, filetype: str) -> None:
             print("Document:", chunk.metadata["filename"])
             print(chunk.page_content[:300])
         _write_chunks(chunks_path(document_id), serialize_chunks(chunks))
+        document.status = "embedding"
+        db.commit()
+
+        embeddings = encode_texts([chunk.page_content for chunk in chunks])
+        _write_embeddings(embeddings_path(document_id), embeddings)
 
         document.num_pages = len(cleaned_pages)
         document.num_chunks = len(chunks)
-        document.status = "embedding"
+        document.status = "embedded"
         db.commit()
     except Exception:
         db.rollback()
@@ -72,6 +83,13 @@ def _write_extracted_pages(path: Path, pages: list[PageText]) -> None:
 def _write_chunks(path: Path, chunks: list[ChunkText]) -> None:
     path.write_text(
         json.dumps(chunks, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _write_embeddings(path: Path, embeddings: list[list[float]]) -> None:
+    path.write_text(
+        json.dumps(embeddings),
         encoding="utf-8",
     )
 
