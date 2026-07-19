@@ -11,6 +11,7 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.models.document import Document, DocumentRead
 from app.rag.processing import process_document
+from app.rag.vectorstore import delete_document as delete_document_vectors
 
 
 router = APIRouter()
@@ -45,6 +46,25 @@ def _file_extension(filename: str) -> str:
         )
 
     return extension.lstrip(".")
+
+
+def _get_document_or_404(document_id: str, db: Session) -> Document:
+    document = db.get(Document, document_id)
+    if document is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found.",
+        )
+
+    return document
+
+
+def _document_dir(document_id: str) -> Path:
+    return settings.UPLOAD_DIR / document_id
+
+
+def _document_source_path(document: Document) -> Path:
+    return _document_dir(document.id) / document.filename
 
 
 @router.post("/upload", response_model=list[DocumentRead], status_code=status.HTTP_201_CREATED)
@@ -105,3 +125,62 @@ def upload_documents(
 @router.get("", response_model=list[DocumentRead])
 def list_documents(db: Session = Depends(get_db)) -> list[Document]:
     return list(db.scalars(select(Document).order_by(Document.upload_time.desc())))
+
+
+@router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_document(document_id: str, db: Session = Depends(get_db)) -> None:
+    document = _get_document_or_404(document_id, db)
+
+    try:
+        delete_document_vectors(document.id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete document vectors.",
+        ) from exc
+
+    upload_dir = _document_dir(document.id)
+    if upload_dir.exists():
+        try:
+            shutil.rmtree(upload_dir)
+        except OSError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to delete uploaded document files.",
+            ) from exc
+
+    db.delete(document)
+    db.commit()
+
+
+@router.post("/{document_id}/refresh", response_model=DocumentRead, status_code=status.HTTP_202_ACCEPTED)
+def refresh_document(
+    document_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> DocumentRead:
+    document = _get_document_or_404(document_id, db)
+    if document.status in {"processing", "embedding"}:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Document is already being processed.",
+        )
+
+    source_path = _document_source_path(document)
+    if not source_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Original uploaded file was not found.",
+        )
+
+    document.status = "processing"
+    db.commit()
+    db.refresh(document)
+    background_tasks.add_task(
+        process_document,
+        document.id,
+        str(source_path),
+        document.filetype,
+    )
+
+    return DocumentRead.model_validate(document)

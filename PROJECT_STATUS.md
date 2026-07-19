@@ -1,12 +1,12 @@
 # Enterprise Document Intelligence Platform - Project Status
 
-Last updated: July 19, 2026
+Last updated: July 20, 2026
 
 ## Project Overview
 
 This project is an Enterprise Document Intelligence Platform built as a full-stack RAG application. The goal is to let users upload business documents, extract and clean their text, index the content into a vector database, and later ask questions over those documents using Gemini through LangChain.
 
-The project currently has a working FastAPI backend foundation, Gemini API wiring, SQLite-backed document tracking, multi-format upload support, document text extraction for PDF, TXT, Markdown, and DOCX files, configurable retrieval chunking, local sentence-transformer embedding generation, persistent ChromaDB vector storage, a semantic search retrieval endpoint, a grounded Gemini RAG answer chain, a source citation layer with SQLite chat logging, and session-scoped conversational memory.
+The project currently has a working FastAPI backend foundation, Gemini API wiring, SQLite-backed document tracking, multi-format upload support, document text extraction for PDF, TXT, Markdown, and DOCX files, configurable retrieval chunking, local sentence-transformer embedding generation, persistent ChromaDB vector storage, a semantic search retrieval endpoint, a grounded Gemini RAG answer chain, a source citation layer with SQLite chat logging, session-scoped conversational memory, and document library management endpoints for listing chunk counts, deleting documents, and refreshing embeddings.
 
 The system is being built module by module so each layer is tested before more RAG logic is added.
 
@@ -1026,6 +1026,59 @@ Verified:
 - `init_db()` applies the chat log session schema guard successfully.
 - A mocked FastAPI `TestClient` smoke test created two turns in one session, retrieved both through `GET /api/chat/{session_id}/history`, and cleared them through `DELETE /api/chat/{session_id}`.
 
+## Module 12: Document Management
+
+Document library management endpoints are implemented.
+
+Implemented files:
+
+- `backend/app/api/documents.py`
+- `backend/app/models/document.py`
+
+Document listing behavior:
+
+- `GET /api/documents` now exposes `chunk_count` alongside the existing `num_chunks` field.
+- `status` remains included so the UI can distinguish `pending`, `processing`, `embedding`, `ready`, and `failed` documents.
+- `chunk_count` is an API-facing alias for the existing `documents.num_chunks` database column, so no database migration is required.
+
+Implemented endpoints:
+
+```http
+DELETE /api/documents/{id}
+POST /api/documents/{id}/refresh
+```
+
+Delete behavior:
+
+1. Loads the document row by ID.
+2. Returns HTTP 404 if the document does not exist.
+3. Calls `vectorstore.delete_document(id)` before deleting the row so ChromaDB vectors do not become orphaned.
+4. Removes the document folder under:
+
+```text
+backend/app/uploads/{document_id}/
+```
+
+5. Deletes the SQLite document row and commits the transaction.
+6. Returns HTTP 204 on success.
+
+Refresh behavior:
+
+1. Loads the document row by ID.
+2. Returns HTTP 404 if the document does not exist.
+3. Returns HTTP 409 if the document is already `processing` or `embedding`.
+4. Verifies the original uploaded file still exists under the document upload folder.
+5. Marks the document as `processing`.
+6. Schedules the existing `process_document()` background pipeline for that one document.
+7. The existing processing pipeline re-runs parse, clean, chunk, local embedding generation, sidecar JSON writes, and ChromaDB indexing.
+8. `add_chunks()` already deletes existing vectors for the same `document_id` before inserting refreshed vectors, so refresh does not duplicate chunks.
+
+Verified:
+
+- Module 12 files compile successfully.
+- FastAPI route registration includes `DELETE /api/documents/{document_id}` and `POST /api/documents/{document_id}/refresh`.
+- `DocumentRead` can serialize both `num_chunks` and `chunk_count` from the SQLAlchemy model.
+
 ## Current API Surface
 
 ### Health Check
@@ -1084,6 +1137,7 @@ Example response:
     "upload_time": "2026-07-18T19:42:20.265688",
     "num_pages": 0,
     "num_chunks": 0,
+    "chunk_count": 0,
     "status": "processing"
   }
 ]
@@ -1106,9 +1160,47 @@ Example response:
     "upload_time": "2026-07-18T19:42:20.265688",
     "num_pages": 1,
     "num_chunks": 3,
+    "chunk_count": 3,
     "status": "ready"
   }
 ]
+```
+
+### Delete Document
+
+```http
+DELETE /api/documents/{document_id}
+```
+
+Deletes the SQLite document row, removes the uploaded document folder from disk, and deletes that document's vectors from ChromaDB.
+
+Successful response:
+
+```http
+204 No Content
+```
+
+### Refresh Document Embeddings
+
+```http
+POST /api/documents/{document_id}/refresh
+```
+
+Re-runs parsing, cleaning, chunking, local embedding generation, sidecar writes, and ChromaDB indexing for one existing document.
+
+Example response:
+
+```json
+{
+  "id": "5935cdd8-6924-4354-b945-f16aa1dff01a",
+  "filename": "notes.md",
+  "filetype": "md",
+  "upload_time": "2026-07-18T19:42:20.265688",
+  "num_pages": 1,
+  "num_chunks": 3,
+  "chunk_count": 3,
+  "status": "processing"
+}
 ```
 
 ### Search Retrieved Chunks
@@ -1215,6 +1307,11 @@ User asks a chat question
   -> Session ID, answer, and source citations are returned
 User views or clears chat history
   -> History is read from or deleted from SQLite by session ID
+User manages the document library
+  -> GET /api/documents returns each document with status and chunk_count
+  -> DELETE /api/documents/{id} removes Chroma vectors, uploaded files, and the SQLite row
+  -> POST /api/documents/{id}/refresh marks one document processing
+  -> The existing background pipeline re-parses, cleans, chunks, embeds, and re-indexes that document
 ```
 
 ## Runtime Files
@@ -1362,6 +1459,9 @@ Completed:
 - Session-scoped chat memory
 - Follow-up query rewriting before retrieval
 - Chat history and clear-session endpoints
+- Document list `chunk_count` response field
+- Document delete endpoint with vector and upload-folder cleanup
+- Document refresh endpoint for reprocessing one document
 - Background parsing task
 - Document status updates
 - Extracted text sidecar JSON output
