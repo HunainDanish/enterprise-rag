@@ -6,7 +6,7 @@ Last updated: July 20, 2026
 
 This project is an Enterprise Document Intelligence Platform built as a full-stack RAG application. The goal is to let users upload business documents, extract and clean their text, index the content into a vector database, and later ask questions over those documents using Gemini through LangChain.
 
-The project currently has a working FastAPI backend foundation, Gemini API wiring, SQLite-backed document tracking, multi-format upload support, document text extraction for PDF, TXT, Markdown, and DOCX files, configurable retrieval chunking, local sentence-transformer embedding generation, persistent ChromaDB vector storage, a semantic search retrieval endpoint, a grounded Gemini RAG answer chain, a source citation layer with SQLite chat logging, session-scoped conversational memory, document library management endpoints for listing chunk counts, deleting documents, and refreshing embeddings, plus a React dashboard shell with Upload, Chat, Library, Stats, and processing-status areas.
+The project currently has a working FastAPI backend foundation, Gemini API wiring, SQLite-backed document tracking, multi-format upload support, document text extraction for PDF, TXT, Markdown, and DOCX files, configurable retrieval chunking, local sentence-transformer embedding generation, persistent ChromaDB vector storage, a semantic search retrieval endpoint, a grounded Gemini RAG answer chain, a source citation layer with SQLite chat logging, session-scoped conversational memory, document library management endpoints for listing chunk counts, deleting documents, and refreshing embeddings, aggregate dashboard stats, plus a fully wired React dashboard for real uploads, document filtering, RAG chat with citations, retrieved chunk inspection, dark mode, and chat export.
 
 The system is being built module by module so each layer is tested before more RAG logic is added.
 
@@ -56,6 +56,7 @@ enterprise-rag/
         chat.py
         documents.py
         search.py
+        stats.py
       core/
         config.py
         database.py
@@ -1151,6 +1152,108 @@ Verified:
 - `npm.cmd run build` passes.
 - Production build generated successfully through Vite.
 
+## Module 14: Frontend-Backend Integration
+
+The dashboard is now wired end-to-end against the real backend APIs.
+
+Implemented files:
+
+- `backend/app/api/stats.py`
+- `backend/app/api/chat.py`
+- `backend/app/main.py`
+- `frontend/src/api/client.ts`
+- `frontend/src/App.tsx`
+- `frontend/src/App.css`
+- `frontend/src/index.css`
+- `frontend/src/components/UploadPanel.tsx`
+- `frontend/src/components/ChatWindow.tsx`
+- `frontend/src/components/DocumentLibrary.tsx`
+- `frontend/src/components/StatsPanel.tsx`
+- `frontend/src/components/ProcessingStatus.tsx`
+
+Backend additions:
+
+- Added `GET /api/stats` for aggregate dashboard metrics:
+  - `total_documents`
+  - `total_chunks`
+  - `total_questions`
+- Registered the stats router in `backend/app/main.py`.
+- Updated `/api/chat` to accept either `query` or the earlier `question` request field, preserving backward compatibility while matching the Module 14 frontend contract.
+
+Frontend API client:
+
+- Added shared TypeScript types for documents, chat sources, retrieved chunks, search responses, and dashboard stats.
+- Added helper functions for:
+  - listing documents
+  - uploading one document with progress
+  - deleting a document
+  - refreshing/reindexing a document
+  - sending chat messages
+  - retrieving search chunks
+  - loading dashboard stats
+
+Upload behavior:
+
+- `UploadPanel` now supports file picker and drag-and-drop intake.
+- Uploads are sent to `POST /api/documents/upload` as multipart form data.
+- Each selected file is uploaded as its own request so the UI can show per-file progress.
+- Uploaded document IDs are polled through `GET /api/documents` until processing moves out of active statuses.
+- Live statuses show upload, processing, embedding, ready, and failure states.
+
+Document library behavior:
+
+- `DocumentLibrary` now lists real rows from `GET /api/documents`.
+- Rows show filetype label, filename, chunk count, file type, and status badge.
+- Delete is wired to `DELETE /api/documents/{document_id}`.
+- Reindex is wired to `POST /api/documents/{document_id}/refresh`.
+- Refresh reloads the document list from the backend.
+
+Metadata filtering:
+
+- The document library includes a checkbox for each document.
+- Selected document IDs are stored in dashboard state.
+- `ChatWindow` passes selected IDs to `/api/chat`.
+- Retrieved chunk inspection passes the same selected IDs to `/api/search`.
+- When no documents are selected, chat and search run against all indexed documents.
+
+Chat behavior:
+
+- `ChatWindow` now sends real requests to `POST /api/chat` with:
+
+```json
+{
+  "session_id": "optional-session-id",
+  "query": "question text",
+  "document_ids": ["optional-document-id"]
+}
+```
+
+- The returned `session_id` is reused for later turns.
+- User and assistant messages render as chat bubbles.
+- Assistant messages show collapsible `Sources` sections with filename, page number, score, and chunk text.
+- The `Show retrieved chunks` toggle calls `GET /api/search` alongside the chat request and renders the retrieved chunks for transparency and grading.
+
+Stats behavior:
+
+- `StatsPanel` now reads `GET /api/stats`.
+- Metrics displayed:
+  - total documents
+  - total chunks
+  - total questions asked
+
+Bonus UI behavior:
+
+- Dark mode is controlled by React state in `App.tsx`.
+- The app applies a `dark` class for Tailwind dark variants and theme CSS variables for the existing dashboard visual system.
+- Chat export downloads the current session as Markdown or JSON from the browser, including message history and citations.
+
+Verified:
+
+- `python -m compileall backend\app` passes.
+- `npm.cmd run lint` passes.
+- `npm.cmd run build` passes.
+- The first backend compile attempt through `backend\venv\Scripts\python.exe` was blocked by Windows with `Access is denied`; the system Python compile check succeeded.
+
 ## Current API Surface
 
 ### Health Check
@@ -1300,11 +1403,16 @@ Request:
 ```json
 {
   "session_id": "optional-session-id",
-  "question": "your question",
+  "query": "your question",
   "chat_history": [],
   "document_ids": null
 }
 ```
+
+Backward-compatible request note:
+
+- The backend still accepts the earlier `question` field.
+- The integrated dashboard sends `query`.
 
 Response:
 
@@ -1324,6 +1432,24 @@ Response:
 ```
 
 Returns a grounded Gemini answer plus de-duplicated source citations containing filename, page number, exact chunk text, and score.
+
+### Dashboard Stats
+
+```http
+GET /api/stats
+```
+
+Returns:
+
+```json
+{
+  "total_documents": 3,
+  "total_chunks": 42,
+  "total_questions": 7
+}
+```
+
+The frontend uses this endpoint directly instead of computing aggregate metrics in React.
 
 ### Chat History
 
@@ -1384,6 +1510,12 @@ User manages the document library
   -> DELETE /api/documents/{id} removes Chroma vectors, uploaded files, and the SQLite row
   -> POST /api/documents/{id}/refresh marks one document processing
   -> The existing background pipeline re-parses, cleans, chunks, embeds, and re-indexes that document
+User uses the integrated dashboard
+  -> UploadPanel sends real multipart uploads and polls document status
+  -> DocumentLibrary lists, filters, refreshes, and deletes real backend documents
+  -> ChatWindow sends session-scoped questions with selected document IDs
+  -> Optional retrieved chunk inspection calls /api/search beside /api/chat
+  -> StatsPanel loads aggregate counts from /api/stats
 ```
 
 ## Runtime Files
@@ -1557,10 +1689,22 @@ Completed:
 - Document list `chunk_count` response field
 - Document delete endpoint with vector and upload-folder cleanup
 - Document refresh endpoint for reprocessing one document
+- Dashboard aggregate stats endpoint
+- `/api/chat` compatibility with `query` and `question` request fields
 - Shared frontend Axios API client using `VITE_API_URL`
+- Shared frontend API helpers and TypeScript response types
 - React Router dashboard route shell
 - Persistent dashboard sidebar/navigation
 - Upload, Chat, Library, and Stats panel skeletons
+- Real drag-and-drop and file-picker upload UI
+- Per-file upload progress with live backend status polling
+- Real document library list with filetype labels, chunk counts, status badges, refresh, and delete
+- Metadata filtering through selected document IDs passed to chat and search
+- Real chat input, session reuse, assistant/user bubbles, and collapsible source citations
+- Retrieved chunk transparency toggle backed by `/api/search`
+- Stats panel backed by `/api/stats`
+- React-state dark mode toggle with Tailwind dark variant hook
+- Browser chat export to Markdown and JSON
 - Processing status indicator with conditional document polling
 - Navy/slate/amber dashboard visual system
 - Background parsing task

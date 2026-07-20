@@ -1,4 +1,5 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
+import { useState } from 'react'
 
 import { ChatWindow } from './components/ChatWindow'
 import { DocumentLibrary } from './components/DocumentLibrary'
@@ -25,8 +26,16 @@ function App() {
 }
 
 function Dashboard() {
+  const [selectedDocumentIds, setSelectedDocumentIds] = useState<string[]>([])
+  const [refreshKey, setRefreshKey] = useState(0)
+  const [isDarkMode, setIsDarkMode] = useState(true)
+
+  const refreshDashboard = () => setRefreshKey((current) => current + 1)
+
   return (
-    <div className="app-shell text-sm antialiased">
+    <div
+      className={`${isDarkMode ? 'dark theme-dark' : 'theme-light'} app-shell text-sm antialiased`}
+    >
       <aside className="sidebar">
         <div className="brand-block">
           <span className="brand-mark">ER</span>
@@ -55,14 +64,28 @@ function Dashboard() {
             <p className="eyebrow">Document intelligence console</p>
             <h1>Knowledge operations</h1>
           </div>
-          <ProcessingStatus />
+          <div className="header-actions">
+            <button
+              type="button"
+              className="mode-toggle dark:border-amber-500/40 dark:text-amber-200"
+              onClick={() => setIsDarkMode((current) => !current)}
+            >
+              {isDarkMode ? 'Light' : 'Dark'}
+            </button>
+            <ProcessingStatus refreshKey={refreshKey} />
+          </div>
         </header>
 
         <div className="dashboard-grid">
-          <UploadPanel />
-          <ChatWindow />
-          <DocumentLibrary />
-          <StatsPanel />
+          <UploadPanel onDocumentsChanged={refreshDashboard} />
+          <ChatWindow selectedDocumentIds={selectedDocumentIds} onActivity={refreshDashboard} />
+          <DocumentLibrary
+            refreshKey={refreshKey}
+            selectedDocumentIds={selectedDocumentIds}
+            onSelectionChange={setSelectedDocumentIds}
+            onDocumentsChanged={refreshDashboard}
+          />
+          <StatsPanel refreshKey={refreshKey} />
         </div>
       </main>
     </div>

@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
@@ -15,10 +15,21 @@ router = APIRouter()
 
 
 class ChatRequest(BaseModel):
-    question: str = Field(min_length=1)
+    question: str | None = Field(default=None, min_length=1)
+    query: str | None = Field(default=None, min_length=1)
     session_id: str | None = None
     chat_history: list[ChatMessage] = Field(default_factory=list)
     document_ids: list[str] | None = None
+
+    @model_validator(mode="after")
+    def require_question_or_query(self) -> "ChatRequest":
+        if self.question is None and self.query is None:
+            raise ValueError("Either question or query is required.")
+        return self
+
+    @property
+    def prompt_text(self) -> str:
+        return (self.query or self.question or "").strip()
 
 
 class ChatSource(BaseModel):
@@ -39,7 +50,7 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)) -> ChatResponse:
     session_id = _normalize_session_id(request.session_id)
     _ensure_session(db, session_id)
     result = answer_question(
-        request.question,
+        request.prompt_text,
         request.chat_history,
         document_ids=request.document_ids,
         session_id=session_id,
@@ -50,7 +61,7 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)) -> ChatResponse:
         answer=result["answer"],
         sources=result["sources"],
     )
-    _log_chat_interaction(db, session_id, request.question, result["sources"], result["answer"])
+    _log_chat_interaction(db, session_id, request.prompt_text, result["sources"], result["answer"])
     return response
 
 

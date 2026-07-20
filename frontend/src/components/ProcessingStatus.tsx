@@ -8,9 +8,13 @@ type DocumentStatus = {
   status: string
 }
 
+type ProcessingStatusProps = {
+  refreshKey: number
+}
+
 const POLL_INTERVAL_MS = 4000
 
-export function ProcessingStatus() {
+export function ProcessingStatus({ refreshKey }: ProcessingStatusProps) {
   const [documents, setDocuments] = useState<DocumentStatus[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -36,7 +40,7 @@ export function ProcessingStatus() {
     }, 0)
 
     return () => window.clearTimeout(timerId)
-  }, [fetchDocuments])
+  }, [fetchDocuments, refreshKey])
 
   useEffect(() => {
     if (!hasActiveDocuments) {

@@ -1,16 +1,18 @@
 @import 'tailwindcss';
+@custom-variant dark (&:where(.dark, .dark *));
 
 :root {
-  --depth-navy: #0f172a;
-  --slate-ink: #1e293b;
-  --slate-panel: #263449;
-  --silver-glass: #e2e8f0;
-  --accent-amber: #f59e0b;
-  --emerald-trust: #10b981;
-  --coral-alert: #ef4444;
-  --muted-sage: #94a3b8;
-  --line: rgba(148, 163, 184, 0.24);
-  --panel-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  --depth-navy: #0b1220;
+  --slate-ink: #172033;
+  --slate-panel: #223047;
+  --surface-strong: #293950;
+  --silver-glass: #f1f5f9;
+  --accent-amber: #f8b84e;
+  --emerald-trust: #34d399;
+  --coral-alert: #fb7185;
+  --muted-sage: #b6c2d1;
+  --line: rgba(203, 213, 225, 0.18);
+  --panel-shadow: 0 18px 44px rgba(0, 0, 0, 0.28);
   --serif:
     'IBM Plex Serif', 'Crimson Text', Georgia, 'Times New Roman', serif;
   --sans:
@@ -28,6 +30,20 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
+.theme-light {
+  --depth-navy: #f3f7fb;
+  --slate-ink: #e7eef7;
+  --slate-panel: #ffffff;
+  --surface-strong: #f8fbff;
+  --silver-glass: #111827;
+  --accent-amber: #a8550a;
+  --emerald-trust: #047857;
+  --coral-alert: #be123c;
+  --muted-sage: #475569;
+  --line: rgba(15, 23, 42, 0.14);
+  --panel-shadow: 0 18px 42px rgba(15, 23, 42, 0.1);
+}
+
 * {
   box-sizing: border-box;
 }
@@ -41,8 +57,15 @@ body {
   min-height: 100svh;
   margin: 0;
   background:
-    linear-gradient(135deg, rgba(245, 158, 11, 0.08), transparent 32rem),
-    radial-gradient(circle at top right, rgba(16, 185, 129, 0.08), transparent 28rem),
+    linear-gradient(135deg, rgba(248, 184, 78, 0.1), transparent 34rem),
+    radial-gradient(circle at top right, rgba(52, 211, 153, 0.1), transparent 30rem),
+    var(--depth-navy);
+}
+
+body:has(.theme-light) {
+  background:
+    linear-gradient(135deg, rgba(180, 83, 9, 0.08), transparent 32rem),
+    radial-gradient(circle at top right, rgba(4, 120, 87, 0.08), transparent 28rem),
     var(--depth-navy);
 }
 
